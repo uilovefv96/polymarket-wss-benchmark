@@ -52,6 +52,7 @@ public class BenchmarkMetrics {
             long generation,
             String callback,
             String source,
+            String failureKind,
             Integer code,
             Integer response,
             String error) {}
@@ -301,6 +302,15 @@ public class BenchmarkMetrics {
         return true;
     }
 
+    public boolean isPingTimedOut(int id, long generation, long nowNanoTime, java.time.Duration timeout) {
+        Connection connection = connections[id];
+        PendingPing pending = connection.pendingPing.get();
+        return connection.generation.get() == generation
+                && pending != null
+                && pending.generation() == generation
+                && nowNanoTime - pending.nanoTime() >= timeout.toNanos();
+    }
+
     public void cancelPing(int id, long generation) {
         Connection connection = connections[id];
         PendingPing pending = connection.pendingPing.get();
@@ -334,7 +344,7 @@ public class BenchmarkMetrics {
         connection.close.set(latest);
         connection.addHistory(
                 new LifecycleEvent(
-                        Instant.now(), generation, callback, source, code, null, error));
+                        Instant.now(), generation, callback, source, null, code, null, error));
     }
 
     public void failure(
@@ -344,12 +354,7 @@ public class BenchmarkMetrics {
             String source,
             Integer response,
             Throwable error) {
-        failure(
-                id,
-                generation,
-                callback,
-                source,
-                response,
+        failure(id, generation, callback, source, "other", response,
                 error == null ? null : error.toString());
     }
 
@@ -360,11 +365,24 @@ public class BenchmarkMetrics {
             String source,
             Integer response,
             String error) {
+        failure(id, generation, callback, source, "other", response, error);
+    }
+
+    public void failure(
+            int id,
+            long generation,
+            String callback,
+            String source,
+            String failureKind,
+            Integer response,
+            String error) {
         Connection connection = connections[id];
-        connection.failure.set(String.valueOf(error));
+        connection.failure.set("other".equals(failureKind)
+                ? String.valueOf(error)
+                : failureKind + ":" + String.valueOf(error));
         connection.addHistory(
                 new LifecycleEvent(
-                        Instant.now(), generation, callback, source, null, response, error));
+                        Instant.now(), generation, callback, source, failureKind, null, response, error));
     }
 
     public void processed(int id) {

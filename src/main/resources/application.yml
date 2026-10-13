@@ -24,3 +24,10 @@ benchmark:
   max-runtime: 20m
   level: 2
   ping-interval: 10s
+  pong-timeout: 25s
+  stable-connection-reset-after: 60s
+  reconnect-base-delay: 500ms
+  reconnect-max-delay: 30s
+  slow-consumer-base-delay: 5s
+  max-concurrent-reconnects: 2
+  subscription-recovery-permits-per-second: 4 # 全局批次/秒，0 表示不限速

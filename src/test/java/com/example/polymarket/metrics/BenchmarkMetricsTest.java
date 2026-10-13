@@ -109,6 +109,20 @@ class BenchmarkMetricsTest {
     }
 
     @Test
+    void detectsPongTimeoutForCurrentGenerationOnly() {
+        BenchmarkMetrics metrics = metrics();
+        metrics.publishGeneration(0, 6);
+        metrics.ping(0, 6, Instant.now(), 1_000);
+
+        assertThat(metrics.isPingTimedOut(0, 6, 25_000_000_999L, java.time.Duration.ofSeconds(25)))
+                .isFalse();
+        assertThat(metrics.isPingTimedOut(0, 6, 25_000_001_000L, java.time.Duration.ofSeconds(25)))
+                .isTrue();
+        assertThat(metrics.isPingTimedOut(0, 5, 25_000_001_000L, java.time.Duration.ofSeconds(25)))
+                .isFalse();
+    }
+
+    @Test
     void cancelsPendingPingWhenSendFails() {
         BenchmarkMetrics metrics = metrics();
         metrics.publishGeneration(0, 5);

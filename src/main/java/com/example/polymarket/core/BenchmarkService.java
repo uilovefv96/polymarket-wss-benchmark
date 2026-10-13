@@ -33,6 +33,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -66,9 +67,11 @@ public class BenchmarkService implements ApplicationRunner, SmartLifecycle {
     private final ConnectionState[] connectionStates;
     private final AtomicIntegerArray reconnectAttempts;
     // 同一连接仅允许一个失败 socket 占用重连槽，避免 onClosed/onFailure/PING 竞态重复调度。
-    private final AtomicReferenceArray<WebSocket> reconnectScheduledFor;
+    private final AtomicReferenceArray<Object> reconnectScheduledFor;
     private final AtomicBoolean running = new AtomicBoolean();
     private final AtomicBoolean acceptingInbound = new AtomicBoolean();
+    private final Semaphore connectPermits;
+    private final GlobalBatchRateLimiter subscriptionRateLimiter;
 
     private volatile List<String> assets = List.of();
     private volatile int currentTarget;
@@ -89,6 +92,9 @@ public class BenchmarkService implements ApplicationRunner, SmartLifecycle {
         this.connectionStates = new ConnectionState[config.getConnections()];
         this.reconnectAttempts = new AtomicIntegerArray(config.getConnections());
         this.reconnectScheduledFor = new AtomicReferenceArray<>(config.getConnections());
+        this.connectPermits = new Semaphore(Math.max(1, config.getMaxConcurrentReconnects()));
+        this.subscriptionRateLimiter =
+                new GlobalBatchRateLimiter(config.getSubscriptionRecoveryPermitsPerSecond());
         for (int i = 0; i < queues.length; i++) {
             queues[i] = new ArrayBlockingQueue<>(config.getQueueCapacity());
             connectionStates[i] = new ConnectionState();
@@ -129,6 +135,16 @@ public class BenchmarkService implements ApplicationRunner, SmartLifecycle {
         if (!running.get()) {
             return;
         }
+        try {
+            connectPermits.acquire();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return;
+        }
+        if (!running.get()) {
+            connectPermits.release();
+            return;
+        }
         ConnectionState state = connectionStates[id];
         long generation;
         synchronized (state) {
@@ -141,12 +157,20 @@ public class BenchmarkService implements ApplicationRunner, SmartLifecycle {
             state.syncing = false;
             metrics.connection(id).subscriptions.set(0);
         }
-        Request request = new Request.Builder().url(config.getUrl()).build();
-        WebSocket socket = client.newWebSocket(request, new Listener(id, generation));
-        synchronized (state) {
-            if (state.generation == generation && state.socket == null) {
-                state.socket = socket;
+        Listener listener = new Listener(id, generation);
+        try {
+            Request request = new Request.Builder().url(config.getUrl()).build();
+            WebSocket socket = client.newWebSocket(request, listener);
+            synchronized (state) {
+                if (state.generation == generation && state.socket == null) {
+                    state.socket = socket;
+                }
             }
+        } catch (RuntimeException e) {
+            listener.releaseConnectPermit();
+            metrics.failure(id, generation, "connect", "okhttp", "connectTimeout", null, e.toString());
+            log.warn("连接 {} generation={} 创建失败", id, generation, e);
+            scheduler.execute(() -> reconnect(id, null, false));
         }
     }
 
@@ -228,6 +252,12 @@ public class BenchmarkService implements ApplicationRunner, SmartLifecycle {
                             return;
                         }
                     }
+                    subscriptionRateLimiter.acquire();
+                    synchronized (state) {
+                        if (!state.open || state.socket != socket || state.generation != generation) {
+                            return;
+                        }
+                    }
                     String payload = mapper.writeValueAsString(planned.payload());
                     boolean sent = socket.send(payload);
                     long queueSize = socket.queueSize();
@@ -241,7 +271,7 @@ public class BenchmarkService implements ApplicationRunner, SmartLifecycle {
                             }
                         }
                         socket.cancel();
-                        reconnect(id, socket);
+                        reconnect(id, socket, false);
                         return;
                     }
                     synchronized (state) {
@@ -271,7 +301,7 @@ public class BenchmarkService implements ApplicationRunner, SmartLifecycle {
             metrics.failure(id, generation, "syncSubscriptions", "subscription", null, e);
             if (socket != null) {
                 socket.cancel();
-                reconnect(id, socket);
+                reconnect(id, socket, false);
             }
         } finally {
             boolean retry;
@@ -330,8 +360,17 @@ public class BenchmarkService implements ApplicationRunner, SmartLifecycle {
             if (socket == null) {
                 continue;
             }
+            long nowNs = System.nanoTime();
+            if (metrics.isPingTimedOut(id, generation, nowNs, config.getPongTimeout())) {
+                String failure = "PONG 超时 " + config.getPongTimeout();
+                metrics.failure(id, generation, "pingAll", "pongTimeout", "pongTimeout", null, failure);
+                log.warn("连接 {} generation={} failureKind=pongTimeout {}", id, generation, failure);
+                socket.cancel();
+                reconnect(id, socket, false);
+                continue;
+            }
             Instant at = Instant.now();
-            if (!metrics.ping(id, generation, at, System.nanoTime())) {
+            if (!metrics.ping(id, generation, at, nowNs)) {
                 continue;
             }
             if (!socket.send("PING")) {
@@ -339,25 +378,29 @@ public class BenchmarkService implements ApplicationRunner, SmartLifecycle {
                 String failure = "PING 发送失败, queueSize=" + socket.queueSize();
                 metrics.failure(id, generation, "pingAll", "ping", null, failure);
                 socket.cancel();
-                reconnect(id, socket);
+                reconnect(id, socket, false);
             }
         }
     }
 
-    private void reconnect(int id, WebSocket failedSocket) {
+    private void reconnect(int id, WebSocket failedSocket, boolean slowConsumer) {
         // 多种失败回调可能指向同一 socket；CAS 确保只安排一次指数退避重连。
+        Object marker = failedSocket == null ? this : failedSocket;
         if (!running.get()
                 || !config.isAutoReconnect()
-                || !reconnectScheduledFor.compareAndSet(id, null, failedSocket)) {
+                || !reconnectScheduledFor.compareAndSet(id, null, marker)) {
             return;
         }
         metrics.reconnected(id, metrics.connection(id).generation.get());
         int attempt = reconnectAttempts.incrementAndGet(id);
-        long base = Math.min(30_000L, 500L << (Math.min(attempt, 6) - 1));
-        long delay = ThreadLocalRandom.current().nextLong(Math.max(1, base / 2), base + 1);
-        log.warn("连接 {} 将在 {} ms 后执行第 {} 次重连", id, delay, attempt);
+        long ceiling = RecoveryPolicy.cappedDelayMillis(attempt, slowConsumer,
+                config.getReconnectBaseDelay(), config.getSlowConsumerBaseDelay(),
+                config.getReconnectMaxDelay());
+        long delay = ceiling == 0 ? 0 : ThreadLocalRandom.current().nextLong(ceiling + 1);
+        log.warn("连接 {} failureKind={} 将在 {} ms 后执行第 {} 次重连", id,
+                slowConsumer ? "slowConsumer" : "other", delay, attempt);
         scheduler.schedule(() -> {
-            reconnectScheduledFor.set(id, null);
+            reconnectScheduledFor.compareAndSet(id, marker, null);
             connect(id);
         }, delay, TimeUnit.MILLISECONDS);
     }
@@ -470,6 +513,8 @@ public class BenchmarkService implements ApplicationRunner, SmartLifecycle {
     private final class Listener extends WebSocketListener {
         private final int id;
         private final long generation;
+        private final AtomicBoolean connectPermitHeld = new AtomicBoolean(true);
+        private final AtomicBoolean opened = new AtomicBoolean();
 
         private Listener(int id, long generation) {
             this.id = id;
@@ -478,6 +523,8 @@ public class BenchmarkService implements ApplicationRunner, SmartLifecycle {
 
         @Override
         public void onOpen(WebSocket socket, Response response) {
+            opened.set(true);
+            releaseConnectPermit();
             ConnectionState state = connectionStates[id];
             synchronized (state) {
                 if (state.generation != generation) {
@@ -490,8 +537,15 @@ public class BenchmarkService implements ApplicationRunner, SmartLifecycle {
                 state.submitted.clear();
                 metrics.connection(id).subscriptions.set(0);
             }
-            reconnectAttempts.set(id, 0);
             reconnectScheduledFor.set(id, null);
+            scheduler.schedule(() -> {
+                synchronized (state) {
+                    if (RecoveryPolicy.mayResetAttempts(generation, state.generation, state.open)) {
+                        reconnectAttempts.set(id, 0);
+                        log.info("连接 {} generation={} 已稳定，重置重连退避", id, generation);
+                    }
+                }
+            }, config.getStableConnectionResetAfter().toMillis(), TimeUnit.MILLISECONDS);
             // 不在重连成功后清空历史 failure；否则阶段报告会丢失导致本次重连的根因。
             log.info(
                     "连接 {} generation={} 已建立，开始同步目标订阅 {}",
@@ -576,8 +630,12 @@ public class BenchmarkService implements ApplicationRunner, SmartLifecycle {
 
         @Override
         public void onClosed(WebSocket socket, int code, String reason) {
+            releaseConnectPermit();
             signalClose();
             metrics.close(id, generation, "onClosed", "remote", code, reason);
+            if (code == 1013) {
+                metrics.failure(id, generation, "onClosed", "remote", "slowConsumer", code, reason);
+            }
             if (!markClosedIfCurrent(socket)) {
                 return;
             }
@@ -587,19 +645,21 @@ public class BenchmarkService implements ApplicationRunner, SmartLifecycle {
                     generation,
                     code,
                     reason);
-            reconnect(id, socket);
+            reconnect(id, socket, code == 1013);
         }
 
         @Override
         public void onFailure(WebSocket socket, Throwable error, Response response) {
+            releaseConnectPermit();
             signalClose();
             metrics.failure(
                     id,
                     generation,
                     "onFailure",
                     "okhttp",
+                    opened.get() ? "other" : "connectTimeout",
                     response == null ? null : response.code(),
-                    error);
+                    error.toString());
             if (!markClosedIfCurrent(socket)) {
                 return;
             }
@@ -610,7 +670,13 @@ public class BenchmarkService implements ApplicationRunner, SmartLifecycle {
                     response == null ? null : response.code(),
                     error.toString(),
                     error);
-            reconnect(id, socket);
+            reconnect(id, socket, false);
+        }
+
+        private void releaseConnectPermit() {
+            if (connectPermitHeld.compareAndSet(true, false)) {
+                connectPermits.release();
+            }
         }
 
         private void signalClose() {

@@ -442,6 +442,31 @@ BACKOFF/COOLDOWN
 4. 无状态业务可接受断线窗口丢失时，RPO 明确为“断线期间事件可能丢失”；若需要订单簿正确性，重连后必须通过 REST snapshot/新的 book snapshot 建立基线后再接增量。
 5. 建议目标：单连接故障 RTO p95 ≤ 60s，单节点故障 95% 分片恢复 ≤ 5min、100% ≤ 10min；具体 SLO 必须在受控故障演练中验证。
 
+### 11.1 快速恢复状态机与一致性口径
+
+```text
+DISCONNECTED
+  -> WAIT_BACKOFF（普通失败以 reconnectBaseDelay，1013 以 slowConsumerBaseDelay，full jitter）
+  -> WAIT_CONNECT_PERMIT（全节点最多 maxConcurrentReconnects 个握手）
+  -> CONNECTING
+  -> OPEN_RECOVERING（全局 subscriptionRecoveryPermitsPerSecond 控制批次）
+  -> OPEN_STABLE（连续 stableConnectionResetAfter 后，且 generation 仍当前才清零 attempts）
+
+OPEN_* -- PONG 超时/网络失败/Close --> WAIT_BACKOFF
+```
+
+所有异步任务和回调都必须校验 `generation`，每个 generation 的握手许可只释放一次。PING 只允许一个 outstanding，但到达 `pongTimeout` 必须判死、记录 `failureKind=pongTimeout`、取消 socket 并重连，不能因为拒绝发送后续 PING 而永久半开。1013 记录为 `slowConsumer`，网络或其他失败记录为 `connectTimeout`/`other`，周期日志和最终报告保留结构化历史。
+
+恢复目标以 RTO/RPO 表达：RTO 从故障被检测到开始，覆盖退避、等待握手许可、连接建立和受限速控制的订阅重放；最坏恢复时间应按分片批次数、全局批次速率及并发故障连接数估算，而不能只算 TCP/TLS 握手。WebSocket 市场流没有补发/游标承诺时，故障窗口的 RPO 无法保证为零；必须通过 REST 快照或其他权威数据源重新建立基线，再把之后的实时增量视为可用。
+
+订阅状态分三层记录：
+
+1. **目标态**：本 generation 按确定性分片应覆盖的 asset 集合；
+2. **已提交态**：客户端 `send(payload)=true`，只说明 OkHttp 接受了上行数据，不代表服务端确认；
+3. **已观察态**：收到能归属于目标 asset 的服务端事件/快照，作为覆盖证据。
+
+当前协议没有逐批订阅 ACK，因此禁止把“已提交态”写成“服务端已确认”。验证策略应在恢复后设置观察窗口，统计目标覆盖率、首条事件时间和未观察 asset；低活跃 asset 不能因没有事件直接判为订阅失败，需结合 REST 快照、抽样活跃资产或官方可用的查询能力交叉验证。只有目标态、已提交态、已观察态都被独立报告，RTO/RPO 和恢复完整性结论才可审计。
+
 ## 12. 容量模型
 
 容量计算必须以实测流量为基础，而不是只按 token 数。

@@ -28,6 +28,13 @@ public class BenchmarkProperties {
     private Duration maxRuntime = Duration.ofMinutes(20);
     private int level = 2;
     private Duration pingInterval = Duration.ofSeconds(10);
+    private Duration pongTimeout = Duration.ofSeconds(25);
+    private Duration stableConnectionResetAfter = Duration.ofSeconds(60);
+    private Duration reconnectBaseDelay = Duration.ofMillis(500);
+    private Duration reconnectMaxDelay = Duration.ofSeconds(30);
+    private Duration slowConsumerBaseDelay = Duration.ofSeconds(5);
+    private int maxConcurrentReconnects = 2;
+    private int subscriptionRecoveryPermitsPerSecond = 4;
 
     public enum ShardingMode {
         ROUND_ROBIN,
@@ -152,5 +159,61 @@ public class BenchmarkProperties {
 
     public void setPingInterval(Duration pingInterval) {
         this.pingInterval = pingInterval;
+    }
+
+    public Duration getPongTimeout() {
+        return pongTimeout;
+    }
+
+    public void setPongTimeout(Duration pongTimeout) {
+        this.pongTimeout = pongTimeout;
+    }
+
+    public Duration getStableConnectionResetAfter() {
+        return stableConnectionResetAfter;
+    }
+
+    public void setStableConnectionResetAfter(Duration stableConnectionResetAfter) {
+        this.stableConnectionResetAfter = stableConnectionResetAfter;
+    }
+
+    public Duration getReconnectBaseDelay() {
+        return reconnectBaseDelay;
+    }
+
+    public void setReconnectBaseDelay(Duration reconnectBaseDelay) {
+        this.reconnectBaseDelay = reconnectBaseDelay;
+    }
+
+    public Duration getReconnectMaxDelay() {
+        return reconnectMaxDelay;
+    }
+
+    public void setReconnectMaxDelay(Duration reconnectMaxDelay) {
+        this.reconnectMaxDelay = reconnectMaxDelay;
+    }
+
+    public Duration getSlowConsumerBaseDelay() {
+        return slowConsumerBaseDelay;
+    }
+
+    public void setSlowConsumerBaseDelay(Duration slowConsumerBaseDelay) {
+        this.slowConsumerBaseDelay = slowConsumerBaseDelay;
+    }
+
+    public int getMaxConcurrentReconnects() {
+        return maxConcurrentReconnects;
+    }
+
+    public void setMaxConcurrentReconnects(int maxConcurrentReconnects) {
+        this.maxConcurrentReconnects = maxConcurrentReconnects;
+    }
+
+    public int getSubscriptionRecoveryPermitsPerSecond() {
+        return subscriptionRecoveryPermitsPerSecond;
+    }
+
+    public void setSubscriptionRecoveryPermitsPerSecond(int subscriptionRecoveryPermitsPerSecond) {
+        this.subscriptionRecoveryPermitsPerSecond = subscriptionRecoveryPermitsPerSecond;
     }
 }
