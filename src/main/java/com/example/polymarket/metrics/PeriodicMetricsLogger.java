@@ -17,6 +17,12 @@ public class PeriodicMetricsLogger {
 
     private record Previous(long frames, long bytes, long sampledAtNs) {}
 
+    record WindowRates(
+            double framesPerSecond,
+            double bytesPerSecond,
+            double kibibytesPerSecond,
+            double framesPerKiB) {}
+
     private final BenchmarkService service;
     private final BenchmarkProperties config;
     private final Map<Integer, Previous> previous = new HashMap<>();
@@ -39,19 +45,22 @@ public class PeriodicMetricsLogger {
                     old == null ? 0 : (sampledAtNs - old.sampledAtNs()) / 1_000_000_000.0;
             long previousFrames = old == null || connection.frames() < old.frames() ? 0 : old.frames();
             long previousBytes = old == null || connection.bytes() < old.bytes() ? 0 : old.bytes();
-            double framesPerSecond =
-                    elapsedSeconds <= 0 ? 0 : (connection.frames() - previousFrames) / elapsedSeconds;
-            double bytesPerSecond =
-                    elapsedSeconds <= 0 ? 0 : (connection.bytes() - previousBytes) / elapsedSeconds;
+            WindowRates rates =
+                    windowRates(
+                            connection.frames() - previousFrames,
+                            connection.bytes() - previousBytes,
+                            elapsedSeconds);
             log.info(
-                    "phase={} conn={} generation={} reconnects={} subscriptions={} frames/s={} bytes/s={} avgFrame={} maxFrame={} lastFrameAt={} maxFrameAt={} maxGapMs={} maxCallback={} bookFrames={} bookBytes={} events={} enqueued={} processed={} dropped={} queue={}/{} ({}%) onMessageUs avg/p95/p99/max={}/{}/{}/{} lastPingAt={} lastPongAt={} pongRttMs last/max={}/{} historySize={} close={} failure={}",
+                    "phase={} conn={} generation={} reconnects={} subscriptions={} frames/s={} bytes/s={} KB/s={} frames/KB={} avgFrame={} maxFrame={} lastFrameAt={} maxFrameAt={} maxGapMs={} maxCallback={} bookFrames={} bookBytes={} events={} enqueued={} processed={} dropped={} queue={}/{} ({}%) onMessageUs avg/p95/p99/max={}/{}/{}/{} lastPingAt={} lastPongAt={} pongRttMs last/max={}/{} historySize={} close={} failure={}",
                     status.get("phase"),
                     connection.id(),
                     connection.generation(),
                     connection.reconnectCount(),
                     connection.subscriptions(),
-                    String.format("%.2f", framesPerSecond),
-                    String.format("%.2f", bytesPerSecond),
+                    String.format("%.2f", rates.framesPerSecond()),
+                    String.format("%.2f", rates.bytesPerSecond()),
+                    String.format("%.2f", rates.kibibytesPerSecond()),
+                    String.format("%.2f", rates.framesPerKiB()),
                     connection.averageFrame(),
                     connection.maxFrame(),
                     connection.lastFrameAt(),
@@ -82,5 +91,17 @@ public class PeriodicMetricsLogger {
                     connection.id(),
                     new Previous(connection.frames(), connection.bytes(), sampledAtNs));
         }
+    }
+
+    static WindowRates windowRates(long frames, long bytes, double elapsedSeconds) {
+        if (elapsedSeconds <= 0) {
+            return new WindowRates(0, 0, 0, 0);
+        }
+        double kibibytes = bytes / 1024.0;
+        return new WindowRates(
+                frames / elapsedSeconds,
+                bytes / elapsedSeconds,
+                kibibytes / elapsedSeconds,
+                kibibytes == 0 ? 0 : frames / kibibytes);
     }
 }

@@ -39,6 +39,28 @@ class BenchmarkMetricsTest {
     }
 
     @Test
+    void addsCumulativeKiBFieldsToSnapshot() {
+        BenchmarkMetrics metrics = metrics();
+        metrics.publishGeneration(0, 1);
+        metrics.frame(0, 1, 3072, "book", System.currentTimeMillis(), 1_000, 2_000, true);
+        metrics.frame(0, 1, 1024, "book", System.currentTimeMillis(), 2_000, 2_000, true);
+
+        var snapshot = metrics.snapshot(new int[] {0}).getFirst();
+
+        assertThat(snapshot.bytes()).isEqualTo(4096);
+        assertThat(snapshot.kibibytes()).isEqualTo(4);
+        assertThat(snapshot.framesPerKiB()).isEqualTo(0.5);
+    }
+
+    @Test
+    void reportsZeroCumulativeFramesPerKiBWhenNoBytesWereReceived() {
+        var snapshot = metrics().snapshot(new int[] {0}).getFirst();
+
+        assertThat(snapshot.kibibytes()).isZero();
+        assertThat(snapshot.framesPerKiB()).isZero();
+    }
+
+    @Test
     void ignoresFramesFromOldGeneration() {
         BenchmarkMetrics metrics = metrics();
         metrics.publishGeneration(0, 2);

@@ -166,7 +166,7 @@ asset 文件加载
 | 层次 | 指标 | 建议统计 |
 |---|---|---|
 | 订阅 | 目标 token、已提交 token、连接数、每连接 token、批大小/间隔、订阅完成时间 | 总量及逐连接 |
-| 入站 frame | frames、frames/s、bytes、bytes/s、平均/最大 frame size | 总量及逐连接，至少 10 秒窗口 |
+| 入站 frame | frames、frames/s、bytes、bytes/s、KB/s、frames/KB、平均/最大 frame size | 总量及逐连接，至少 10 秒窗口 |
 | event | events、events/s、event type 分布、unknown/mixed 数 | 若无法精确计数，明确标记未采集 |
 | `book` | book frames、book bytes、占总 frames/bytes 比例 | 总量及逐连接 |
 | 回调 | `onMessage` avg/p95/p99/max | 逐连接 |
@@ -175,6 +175,8 @@ asset 文件加载
 | JVM | 进程 CPU、堆/非堆、分配率、Young/Old GC 次数和 pause、线程数 | 进程级；必要时 JFR |
 | OS/网络 | 主机 CPU、RSS、网卡 bytes/s、丢包/重传、RTT、DNS/TLS/握手异常 | 主机与链路级 |
 | 业务 | 端到端处理时延、有效事件处理率、数据新鲜度 | 若业务链路已接入 |
+
+口径约定：`bytes/s` 始终表示每秒原始字节数；周期日志沿用需求中的 `KB/s` 标签，但明确按 `KB/s = bytes/s / 1024` 计算，即此处 `1 KB = 1024 bytes`。周期日志的 `frames/KB` 使用同一采样窗口计算，即 `窗口 frames / (窗口 bytes / 1024)`，窗口 bytes 为 0 时记为 0。最终 JSON/CSV 为避免二进制/十进制前缀歧义，阶段快照使用阶段累计量：`kibibytes = 累计 bytes / 1024`，`framesPerKiB`（CSV 为 `frames_per_kib`）等于 `累计 frames / kibibytes`，累计 bytes 为 0 时记为 0；它们不是速率指标，也不应与十进制 KB（1000 bytes）混用。
 
 ### 5.2 阶段结果分级
 

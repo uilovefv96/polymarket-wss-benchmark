@@ -38,9 +38,17 @@ public class ReportWriter {
         mapper.writerWithDefaultPrettyPrinter()
                 .writeValue(directory.resolve("benchmark-" + timestamp + ".json").toFile(), latest);
 
+        String csv = buildCsv(phases);
+        Files.writeString(
+                directory.resolve("benchmark-" + timestamp + ".csv"),
+                csv,
+                StandardCharsets.UTF_8);
+    }
+
+    String buildCsv(List<BenchmarkMetrics.PhaseSnapshot> phases) throws JsonProcessingException {
         StringBuilder csv =
                 new StringBuilder(
-                        "phase,started_at,ended_at,connection,generation,reconnect_count,subscriptions,frames,bytes,average_frame,max_frame,last_frame_at,max_frame_at,max_frame_context,max_inter_frame_gap_ns,book_frames,book_bytes,enqueued,processed,dropped,queue_depth,queue_usage,on_message_avg_us,on_message_p95_us,on_message_p99_us,on_message_max_us,max_callback_context,last_ping_at,last_pong_at,last_pong_rtt_ms,max_pong_rtt_ms,close,failure,event_types,history\n");
+                        "phase,started_at,ended_at,connection,generation,reconnect_count,subscriptions,frames,bytes,kibibytes,frames_per_kib,average_frame,max_frame,last_frame_at,max_frame_at,max_frame_context,max_inter_frame_gap_ns,book_frames,book_bytes,enqueued,processed,dropped,queue_depth,queue_usage,on_message_avg_us,on_message_p95_us,on_message_p99_us,on_message_max_us,max_callback_context,last_ping_at,last_pong_at,last_pong_rtt_ms,max_pong_rtt_ms,close,failure,event_types,history\n");
         for (var phase : phases) {
             for (var connection : phase.connections()) {
                 csv.append(quote(phase.phase()))
@@ -60,6 +68,10 @@ public class ReportWriter {
                         .append(connection.frames())
                         .append(',')
                         .append(connection.bytes())
+                        .append(',')
+                        .append(connection.kibibytes())
+                        .append(',')
+                        .append(connection.framesPerKiB())
                         .append(',')
                         .append(connection.averageFrame())
                         .append(',')
@@ -115,10 +127,7 @@ public class ReportWriter {
                         .append('\n');
             }
         }
-        Files.writeString(
-                directory.resolve("benchmark-" + timestamp + ".csv"),
-                csv,
-                StandardCharsets.UTF_8);
+        return csv.toString();
     }
 
     public Map<String, Object> latest() {

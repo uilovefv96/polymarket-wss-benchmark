@@ -52,7 +52,7 @@ java -jar target/polymarket-wss-benchmark-1.0.0.jar --benchmark.phase-subscripti
 - `GET /actuator/health`
 - `GET /actuator/prometheus`
 
-每 10 秒日志输出每连接速率、帧大小、book 流量、事件计数、队列与 onMessage 延迟。运行结束在 `reports/` 写入按阶段汇总的 JSON 和 CSV。
+每 10 秒日志输出每连接速率、帧大小、book 流量、事件计数、队列与 onMessage 延迟。速率日志保留 `frames/s` 和原始字节口径的 `bytes/s`，并同时输出 `KB/s`（此处明确按 `1 KB = 1024 bytes` 计算）及窗口 `frames/KB = 窗口 frames ÷ (窗口 bytes / 1024)`；窗口 bytes 为 0 时 `frames/KB` 记为 0。运行结束在 `reports/` 写入按阶段汇总的 JSON 和 CSV，其中每连接阶段快照的 `kibibytes` 为累计 `bytes / 1024`，`framesPerKiB`（CSV 为 `frames_per_kib`）为累计 `frames / kibibytes`，累计 bytes 为 0 时记为 0。这些累计字段不是每秒速率。
 
 ## 实验方法
 
