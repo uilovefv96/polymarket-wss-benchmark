@@ -1,0 +1,26 @@
+server:
+  port: 8080
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  endpoint:
+    health:
+      show-details: always
+benchmark:
+  url: wss://ws-subscriptions-clob.polymarket.com/ws/market
+  assets-file: classpath:assets_ids.txt
+  phase-subscription-counts: [100, 500, 1000]
+  phase-duration: 5m
+  subscription-batch-size: 100
+  subscription-batch-interval: 250ms
+  connections: 1
+  sharding-mode: ROUND_ROBIN # ROUND_ROBIN 或 CONTIGUOUS
+  queue-capacity: 10000
+  consumers: 4
+  simulated-processing-delay: 0ms
+  auto-reconnect: true
+  max-runtime: 20m
+  level: 2
+  ping-interval: 10s

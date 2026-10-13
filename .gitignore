@@ -1,0 +1,24 @@
+# Maven build output
+target/
+
+# Benchmark inputs containing real Polymarket token IDs
+src/main/resources/assets_ids.txt
+
+# Benchmark reports and runtime diagnostics
+reports/
+*.log
+hs_err_pid*
+replay_pid*
+
+# JVM -Xlog files accidentally created from malformed command arguments
+,uptime,level,tags*
+
+# IntelliJ IDEA local metadata
+.idea/
+*.iml
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
