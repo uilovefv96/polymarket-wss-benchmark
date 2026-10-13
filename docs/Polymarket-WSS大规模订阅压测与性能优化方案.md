@@ -485,17 +485,17 @@ B_required = H × (book_bytes_per_sec + non_book_bytes_per_sec + protocol_overhe
 
 ### 14.2 阶段结果
 
-| 轮次 | 级别 | 总 token | 连接数 | token/连接 min/avg/max | 批大小/间隔 | 升压耗时 | 稳态时长 | frames/s avg/p95/max | events/s avg/p95/max | bytes/s avg/p95/max | book bytes 占比 | max frame | queue peak/斜率 | dropped | CPU peak | 分配率 | GC pause p99/max | PONG 最大年龄 | close/failure/重连 | 网络重传/RTT | 结果 | 停止原因 |
-|---|---|---:|---:|---|---|---|---|---|---|---|---:|---:|---|---:|---:|---|---|---|---|---|---|---|
-| | | | | | | | | | | | | | | | | | | | | | | |
+| 轮次 | 级别 | 总 token | 连接数 | token/连接 min/avg/max | 批大小/间隔 | 升压耗时 | 稳态时长 | frames/s avg/p95/max | events/s avg/p95/max | bytes/s avg/p95/max | KiB/s avg/p95/max | frames/KiB avg/p95/max | book bytes 占比 | max frame | queue peak/斜率 | dropped | CPU peak | 分配率 | GC pause p99/max | PONG 最大年龄 | close/failure/重连 | 网络重传/RTT | 结果 | 停止原因 |
+|---|---|---:|---:|---|---|---|---|---|---|---|---|---|---|---:|---:|---|---:|---:|---|---|---|---|---|---|---|
+| | | | | | | | | | | | | | | | | | | | | | | | | |
 
 > 若 `events/s` 当前无法精确采集，填写“未采集”，不可复制 `frames/s`。
 
 ### 14.3 逐连接记录
 
-| 实验 ID | 连接 ID | token 数 | 订阅完成时间 | frames | events | bytes | book frames/bytes | avg/max frame | onMessage avg/p95/p99/max | enqueued/processed/dropped | queue peak | send queue peak | last PONG age | close | failure | reconnects |
-|---|---:|---:|---|---:|---:|---:|---|---|---|---|---:|---:|---|---|---|---:|
-| | | | | | | | | | | | | | | | | |
+| 实验 ID | 连接 ID | token 数 | 订阅完成时间 | frames | events | bytes/KiB | frames/KiB | book frames/bytes | avg/max frame | onMessage avg/p95/p99/max | enqueued/processed/dropped | queue peak | send queue peak | last PONG age | close | failure | reconnects |
+|---|---:|---:|---|---:|---:|---|---:|---|---|---|---:|---:|---|---|---|---:|
+| | | | | | | | | | | | | | | | | | |
 
 ### 14.4 归因与结论
 
