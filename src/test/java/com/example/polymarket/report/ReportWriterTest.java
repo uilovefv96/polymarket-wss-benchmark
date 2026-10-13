@@ -29,9 +29,20 @@ class ReportWriterTest {
         String json = mapper.writeValueAsString(phase);
         String csv = writer.buildCsv(List.of(phase));
 
-        assertThat(json).contains("\"kibibytes\":2.0", "\"framesPerKiB\":0.5");
+        assertThat(json)
+                .contains(
+                        "\"kibibytes\":2.0",
+                        "\"framesPerKiB\":0.5",
+                        "\"frames100ms\":",
+                        "\"bytes100ms\":",
+                        "\"kibibytes100ms\":",
+                        "\"framesPerKiB100ms\":",
+                        "\"frames1s\":",
+                        "\"bytes1s\":",
+                        "\"kibibytes1s\":",
+                        "\"framesPerKiB1s\":");
         assertThat(csv)
-                .startsWith("phase,started_at,ended_at,connection,generation,reconnect_count,subscriptions,frames,bytes,kibibytes,frames_per_kib,")
+                .startsWith("phase,started_at,ended_at,connection,generation,reconnect_count,subscriptions,frames,bytes,kibibytes,frames_per_kib,frames_100ms,bytes_100ms,kibibytes_100ms,frames_per_kib_100ms,frames_1s,bytes_1s,kibibytes_1s,frames_per_kib_1s,")
                 .contains(",1,2048,2.0,0.5,");
     }
 

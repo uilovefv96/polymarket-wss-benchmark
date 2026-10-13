@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.example.polymarket.config.BenchmarkProperties;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Instant;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 
 class BenchmarkMetricsTest {
@@ -58,6 +59,32 @@ class BenchmarkMetricsTest {
 
         assertThat(snapshot.kibibytes()).isZero();
         assertThat(snapshot.framesPerKiB()).isZero();
+    }
+
+    @Test
+    void reportsDeterministicHundredMillisecondAndOneSecondWindows() {
+        AtomicLong nowNs = new AtomicLong(1_000_000_000L);
+        BenchmarkMetrics metrics = metrics(nowNs);
+        metrics.publishGeneration(0, 1);
+        metrics.frame(0, 1, 1024, "book", 1, 910_000_000L, 1, true);
+        metrics.frame(0, 1, 2048, "book", 1, 500_000_000L, 1, true);
+        metrics.frame(0, 1, 4096, "book", 1, 0, 1, true);
+
+        var snapshot = metrics.snapshot(new int[] {0}).getFirst();
+
+        assertThat(snapshot.frames100ms()).isEqualTo(1);
+        assertThat(snapshot.bytes100ms()).isEqualTo(1024);
+        assertThat(snapshot.kibibytes100ms()).isEqualTo(1);
+        assertThat(snapshot.framesPerKiB100ms()).isEqualTo(1);
+        assertThat(snapshot.frames1s()).isEqualTo(2);
+        assertThat(snapshot.bytes1s()).isEqualTo(3072);
+        assertThat(snapshot.kibibytes1s()).isEqualTo(3);
+        assertThat(snapshot.framesPerKiB1s()).isEqualTo(2.0 / 3);
+
+        nowNs.set(1_020_000_000L);
+        snapshot = metrics.snapshot(new int[] {0}).getFirst();
+        assertThat(snapshot.frames100ms()).isZero();
+        assertThat(snapshot.frames1s()).isEqualTo(2);
     }
 
     @Test
@@ -151,9 +178,13 @@ class BenchmarkMetricsTest {
     }
 
     private static BenchmarkMetrics metrics() {
+        return metrics(new AtomicLong(System.nanoTime()));
+    }
+
+    private static BenchmarkMetrics metrics(AtomicLong nanoTime) {
         BenchmarkProperties properties = new BenchmarkProperties();
         properties.setConnections(1);
         properties.setQueueCapacity(10);
-        return new BenchmarkMetrics(properties, new SimpleMeterRegistry());
+        return new BenchmarkMetrics(properties, new SimpleMeterRegistry(), nanoTime::get);
     }
 }

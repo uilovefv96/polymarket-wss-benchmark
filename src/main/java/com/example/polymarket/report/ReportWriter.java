@@ -48,7 +48,7 @@ public class ReportWriter {
     String buildCsv(List<BenchmarkMetrics.PhaseSnapshot> phases) throws JsonProcessingException {
         StringBuilder csv =
                 new StringBuilder(
-                        "phase,started_at,ended_at,connection,generation,reconnect_count,subscriptions,frames,bytes,kibibytes,frames_per_kib,average_frame,max_frame,last_frame_at,max_frame_at,max_frame_context,max_inter_frame_gap_ns,book_frames,book_bytes,enqueued,processed,dropped,queue_depth,queue_usage,on_message_avg_us,on_message_p95_us,on_message_p99_us,on_message_max_us,max_callback_context,last_ping_at,last_pong_at,last_pong_rtt_ms,max_pong_rtt_ms,close,failure,event_types,history\n");
+                        "phase,started_at,ended_at,connection,generation,reconnect_count,subscriptions,frames,bytes,kibibytes,frames_per_kib,frames_100ms,bytes_100ms,kibibytes_100ms,frames_per_kib_100ms,frames_1s,bytes_1s,kibibytes_1s,frames_per_kib_1s,average_frame,max_frame,last_frame_at,max_frame_at,max_frame_context,max_inter_frame_gap_ns,book_frames,book_bytes,enqueued,processed,dropped,queue_depth,queue_usage,on_message_avg_us,on_message_p95_us,on_message_p99_us,on_message_max_us,max_callback_context,last_ping_at,last_pong_at,last_pong_rtt_ms,max_pong_rtt_ms,close,failure,event_types,history\n");
         for (var phase : phases) {
             for (var connection : phase.connections()) {
                 csv.append(quote(phase.phase()))
@@ -72,6 +72,22 @@ public class ReportWriter {
                         .append(connection.kibibytes())
                         .append(',')
                         .append(connection.framesPerKiB())
+                        .append(',')
+                        .append(connection.frames100ms())
+                        .append(',')
+                        .append(connection.bytes100ms())
+                        .append(',')
+                        .append(connection.kibibytes100ms())
+                        .append(',')
+                        .append(connection.framesPerKiB100ms())
+                        .append(',')
+                        .append(connection.frames1s())
+                        .append(',')
+                        .append(connection.bytes1s())
+                        .append(',')
+                        .append(connection.kibibytes1s())
+                        .append(',')
+                        .append(connection.framesPerKiB1s())
                         .append(',')
                         .append(connection.averageFrame())
                         .append(',')

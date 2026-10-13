@@ -56,7 +56,7 @@ public class BenchmarkService implements ApplicationRunner, SmartLifecycle {
     private final ObjectMapper mapper;
     private final BenchmarkMetrics metrics;
     private final ReportWriter reports;
-    private final OkHttpClient client = new OkHttpClient.Builder().readTimeout(Duration.ZERO).build();
+    private final OkHttpClient client;
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2, r -> new Thread(r, "benchmark-scheduler"));
     private final ExecutorService phaseExecutor = Executors.newSingleThreadExecutor(r -> new Thread(r, "benchmark-phase"));
     private final ExecutorService subscriptionExecutor;
@@ -83,11 +83,24 @@ public class BenchmarkService implements ApplicationRunner, SmartLifecycle {
             ObjectMapper mapper,
             BenchmarkMetrics metrics,
             ReportWriter reports) {
+        this(config, loader, mapper, metrics, reports,
+                new OkHttpClient.Builder().readTimeout(Duration.ZERO).build());
+    }
+
+    @SuppressWarnings("unchecked")
+    BenchmarkService(
+            BenchmarkProperties config,
+            AssetIdLoader loader,
+            ObjectMapper mapper,
+            BenchmarkMetrics metrics,
+            ReportWriter reports,
+            OkHttpClient client) {
         this.config = config;
         this.loader = loader;
         this.mapper = mapper;
         this.metrics = metrics;
         this.reports = reports;
+        this.client = client;
         this.queues = new ArrayBlockingQueue[config.getConnections()];
         this.connectionStates = new ConnectionState[config.getConnections()];
         this.reconnectAttempts = new AtomicIntegerArray(config.getConnections());
@@ -364,8 +377,14 @@ public class BenchmarkService implements ApplicationRunner, SmartLifecycle {
                 String failure = "PONG 超时 " + config.getPongTimeout();
                 metrics.failure(id, generation, "pingAll", "pongTimeout", "pongTimeout", null, failure);
                 log.warn("连接 {} generation={} failureKind=pongTimeout {}", id, generation, failure);
-                socket.cancel();
+                synchronized (state) {
+                    if (state.generation == generation && state.socket == socket) {
+                        state.open = false;
+                    }
+                }
+                // 先占用该 socket 的重连槽，再 cancel；否则零退避时 onFailure 与本线程可能各调度一次。
                 reconnect(id, socket, false);
+                socket.cancel();
                 continue;
             }
             Instant at = Instant.now();
@@ -398,10 +417,8 @@ public class BenchmarkService implements ApplicationRunner, SmartLifecycle {
         long delay = ceiling == 0 ? 0 : ThreadLocalRandom.current().nextLong(ceiling + 1);
         log.warn("连接 {} failureKind={} 将在 {} ms 后执行第 {} 次重连", id,
                 slowConsumer ? "slowConsumer" : "other", delay, attempt);
-        scheduler.schedule(() -> {
-            reconnectScheduledFor.compareAndSet(id, marker, null);
-            connect(id);
-        }, delay, TimeUnit.MILLISECONDS);
+        // 重连槽保持占用直至新连接 onOpen；旧 socket 的迟到 onFailure 因而不能再安排一次连接。
+        scheduler.schedule(() -> connect(id), delay, TimeUnit.MILLISECONDS);
     }
 
     public Map<String, Object> status() {

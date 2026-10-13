@@ -45,6 +45,28 @@ java -jar target/polymarket-wss-benchmark-1.0.0.jar --benchmark.phase-subscripti
 
 应用启动即连接公网并执行实验；在受控环境运行。本项目的构建和单元测试不会建立公网连接。
 
+### Windows 受控压测
+
+`tools/run-controlled-benchmark.ps1` 默认按等效 2C2G 环境启动 JAR：`ActiveProcessorCount=2`、`Xms512m`、`Xmx1200m`、`MaxDirectMemorySize=256m`、`Xss512k`、G1GC。每次运行会在 `reports/controlled-<UTC 时间>/` 创建独立目录，自动保存 GC log、JFR、进程指标 CSV（CPU%、WorkingSet、PrivateMemory、线程数、句柄数）和 metadata JSON（Java/JVM、PID、git 状态、开始时间及文件路径）。文本和 CSV 均使用 UTF-8。
+
+先用不启动 Java、不访问公网的 dry-run 检查解析结果：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/run-controlled-benchmark.ps1 -DryRun -ApplicationArgs '--benchmark.connections=2'
+```
+
+实际运行；`DurationSeconds=0` 表示由应用自行结束，正数表示达到指定秒数后终止：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/run-controlled-benchmark.ps1 -DurationSeconds 600 -ApplicationArgs '--benchmark.connections=2'
+```
+
+可用 `-JarPath`、`-ReportRoot`、`-SampleIntervalSeconds` 和 `-JavaCommand` 覆盖路径、采样间隔或 Java 命令；通过 `-ApplicationArgs` 传入一个或多个 Spring Boot 参数。查看完整参数：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/run-controlled-benchmark.ps1 -Help
+```
+
 只读端点：
 
 - `GET /api/status`

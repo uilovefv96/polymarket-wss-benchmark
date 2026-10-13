@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.LongSupplier;
 
 /** 汇总连接、消息、队列、回调耗时和连接生命周期指标，并生成阶段快照。 */
 public class BenchmarkMetrics {
@@ -59,6 +60,50 @@ public class BenchmarkMetrics {
 
     private record PendingPing(long generation, Instant at, long nanoTime) {}
 
+    /** 使用固定 10ms 桶保存最近一秒吞吐；写入和读取均不创建临时集合。 */
+    static final class ShortWindowCounters {
+        private static final long BUCKET_NS = 10_000_000L;
+        private static final int BUCKET_COUNT = 100;
+        private final long[] ticks = new long[BUCKET_COUNT];
+        private final long[] frames = new long[BUCKET_COUNT];
+        private final long[] bytes = new long[BUCKET_COUNT];
+
+        synchronized void add(long nanoTime, int byteCount) {
+            long tick = Math.floorDiv(nanoTime, BUCKET_NS);
+            int index = Math.floorMod(tick, BUCKET_COUNT);
+            if (ticks[index] != tick) {
+                ticks[index] = tick;
+                frames[index] = 0;
+                bytes[index] = 0;
+            }
+            frames[index]++;
+            bytes[index] += byteCount;
+        }
+
+        synchronized WindowCount snapshot(long nowNs, long windowNs) {
+            long nowTick = Math.floorDiv(nowNs, BUCKET_NS);
+            long oldestTick = Math.floorDiv(nowNs - windowNs, BUCKET_NS);
+            long frameCount = 0;
+            long byteCount = 0;
+            for (int index = 0; index < BUCKET_COUNT; index++) {
+                long tick = ticks[index];
+                if (tick > oldestTick && tick <= nowTick) {
+                    frameCount += frames[index];
+                    byteCount += bytes[index];
+                }
+            }
+            return new WindowCount(frameCount, byteCount);
+        }
+
+        synchronized void reset() {
+            Arrays.fill(ticks, 0);
+            Arrays.fill(frames, 0);
+            Arrays.fill(bytes, 0);
+        }
+    }
+
+    private record WindowCount(long frames, long bytes) {}
+
     /** 单条连接的无锁/低竞争指标容器。 */
     public static final class Connection {
         public final LongAdder frames = new LongAdder();
@@ -90,6 +135,7 @@ public class BenchmarkMetrics {
                 new AtomicLongArray(LATENCY_BOUNDS.length + 1);
 
         private final AtomicLong lastFrameNanoTime = new AtomicLong();
+        private final ShortWindowCounters shortWindows = new ShortWindowCounters();
         private final AtomicReference<PendingPing> pendingPing = new AtomicReference<>();
         private final Deque<LifecycleEvent> history = new ArrayDeque<>(HISTORY_CAPACITY);
 
@@ -118,6 +164,14 @@ public class BenchmarkMetrics {
             long bytes,
             double kibibytes,
             double framesPerKiB,
+            long frames100ms,
+            long bytes100ms,
+            double kibibytes100ms,
+            double framesPerKiB100ms,
+            long frames1s,
+            long bytes1s,
+            double kibibytes1s,
+            double framesPerKiB1s,
             long bookFrames,
             long bookBytes,
             long enqueued,
@@ -153,6 +207,7 @@ public class BenchmarkMetrics {
 
     private final Connection[] connections;
     private final AtomicIntegerArray queueDepths;
+    private final LongSupplier nanoTime;
     private final int queueCapacity;
     private final List<PhaseSnapshot> phases =
             Collections.synchronizedList(new ArrayList<>());
@@ -160,6 +215,12 @@ public class BenchmarkMetrics {
     private final AtomicReference<Instant> phaseStarted = new AtomicReference<>(Instant.now());
 
     public BenchmarkMetrics(BenchmarkProperties properties, MeterRegistry registry) {
+        this(properties, registry, System::nanoTime);
+    }
+
+    BenchmarkMetrics(
+            BenchmarkProperties properties, MeterRegistry registry, LongSupplier nanoTime) {
+        this.nanoTime = nanoTime;
         queueCapacity = properties.getQueueCapacity();
         connections = new Connection[properties.getConnections()];
         queueDepths = new AtomicIntegerArray(properties.getConnections());
@@ -213,6 +274,7 @@ public class BenchmarkMetrics {
 
         connection.frames.increment();
         connection.bytes.add(bytes);
+        connection.shortWindows.add(callbackStartedNs, bytes);
         connection.lastFrameAtEpochMs.set(callbackStartedEpochMs);
         updateMaxFrame(connection.maxFrame, callbackStartedEpochMs, type, bytes);
         updateMaxCallback(
@@ -341,7 +403,9 @@ public class BenchmarkMetrics {
             int id, long generation, String callback, String source, Integer code, String error) {
         Connection connection = connections[id];
         String latest = code == null ? String.valueOf(error) : code + ":" + String.valueOf(error);
-        connection.close.set(latest);
+        if (connection.generation.get() == generation) {
+            connection.close.set(latest);
+        }
         connection.addHistory(
                 new LifecycleEvent(
                         Instant.now(), generation, callback, source, null, code, null, error));
@@ -377,9 +441,11 @@ public class BenchmarkMetrics {
             Integer response,
             String error) {
         Connection connection = connections[id];
-        connection.failure.set("other".equals(failureKind)
-                ? String.valueOf(error)
-                : failureKind + ":" + String.valueOf(error));
+        if (connection.generation.get() == generation) {
+            connection.failure.set("other".equals(failureKind)
+                    ? String.valueOf(error)
+                    : failureKind + ":" + String.valueOf(error));
+        }
         connection.addHistory(
                 new LifecycleEvent(
                         Instant.now(), generation, callback, source, failureKind, null, response, error));
@@ -410,6 +476,7 @@ public class BenchmarkMetrics {
             connection.maxInterFrameGapNs.set(0);
             connection.lastFrameNanoTime.set(0);
             connection.latencyMaxNs.set(0);
+            connection.shortWindows.reset();
             connection.eventTypes.clear();
             for (int index = 0; index < connection.latencyBuckets.length(); index++) {
                 connection.latencyBuckets.set(index, 0);
@@ -431,6 +498,7 @@ public class BenchmarkMetrics {
     }
 
     public List<ConnectionSnapshot> snapshot(int[] depths) {
+        long sampledAtNs = nanoTime.getAsLong();
         List<ConnectionSnapshot> result = new ArrayList<>();
         for (int id = 0; id < connections.length; id++) {
             Connection connection = connections[id];
@@ -442,6 +510,8 @@ public class BenchmarkMetrics {
                     (type, count) -> eventTypes.put(type, count.sum()));
             FramePeak maxFrame = connection.maxFrame.get();
             CallbackPeak maxCallback = connection.maxCallback.get();
+            WindowCount window100ms = connection.shortWindows.snapshot(sampledAtNs, 100_000_000L);
+            WindowCount window1s = connection.shortWindows.snapshot(sampledAtNs, 1_000_000_000L);
             result.add(
                     new ConnectionSnapshot(
                             id,
@@ -451,7 +521,15 @@ public class BenchmarkMetrics {
                             frames,
                             bytes,
                             bytes / 1024.0,
-                            bytes == 0 ? 0 : frames / (bytes / 1024.0),
+                            framesPerKiB(frames, bytes),
+                            window100ms.frames(),
+                            window100ms.bytes(),
+                            window100ms.bytes() / 1024.0,
+                            framesPerKiB(window100ms.frames(), window100ms.bytes()),
+                            window1s.frames(),
+                            window1s.bytes(),
+                            window1s.bytes() / 1024.0,
+                            framesPerKiB(window1s.frames(), window1s.bytes()),
                             connection.bookFrames.sum(),
                             connection.bookBytes.sum(),
                             connection.enqueued.sum(),
@@ -482,6 +560,10 @@ public class BenchmarkMetrics {
                             connection.historySnapshot()));
         }
         return result;
+    }
+
+    private static double framesPerKiB(long frames, long bytes) {
+        return bytes == 0 ? 0 : frames / (bytes / 1024.0);
     }
 
     private static Instant instantOrNull(long epochMs) {
