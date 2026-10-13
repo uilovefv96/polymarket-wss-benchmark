@@ -1,6 +1,7 @@
 package com.example.polymarket.report;
 
 import com.example.polymarket.metrics.BenchmarkMetrics;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -12,11 +13,7 @@ import java.util.List;
 import java.util.Map;
 import org.springframework.stereotype.Component;
 
-/**
- * 将最终阶段指标写入 JSON 和 CSV 报告，并保留最近一次报告供接口查询。
- *
- * <p>写入方法使用同步锁保证同一时刻只生成一组文件；{@code latest} 使用 volatile 发布不可变报告映射，允许控制器线程无锁读取。
- */
+/** 将最终阶段指标写入 JSON 和 CSV 报告，并保留最近一次报告供接口查询。 */
 @Component
 public class ReportWriter {
     private final ObjectMapper mapper;
@@ -43,7 +40,7 @@ public class ReportWriter {
 
         StringBuilder csv =
                 new StringBuilder(
-                        "phase,started_at,ended_at,connection,subscriptions,frames,bytes,average_frame,max_frame,book_frames,book_bytes,enqueued,processed,dropped,queue_depth,queue_usage,on_message_avg_us,on_message_p95_us,on_message_p99_us,on_message_max_us,last_pong,close,failure,event_types\n");
+                        "phase,started_at,ended_at,connection,generation,reconnect_count,subscriptions,frames,bytes,average_frame,max_frame,last_frame_at,max_frame_at,max_frame_context,max_inter_frame_gap_ns,book_frames,book_bytes,enqueued,processed,dropped,queue_depth,queue_usage,on_message_avg_us,on_message_p95_us,on_message_p99_us,on_message_max_us,max_callback_context,last_ping_at,last_pong_at,last_pong_rtt_ms,max_pong_rtt_ms,close,failure,event_types,history\n");
         for (var phase : phases) {
             for (var connection : phase.connections()) {
                 csv.append(quote(phase.phase()))
@@ -54,6 +51,10 @@ public class ReportWriter {
                         .append(',')
                         .append(connection.id())
                         .append(',')
+                        .append(connection.generation())
+                        .append(',')
+                        .append(connection.reconnectCount())
+                        .append(',')
                         .append(connection.subscriptions())
                         .append(',')
                         .append(connection.frames())
@@ -63,6 +64,14 @@ public class ReportWriter {
                         .append(connection.averageFrame())
                         .append(',')
                         .append(connection.maxFrame())
+                        .append(',')
+                        .append(connection.lastFrameAt())
+                        .append(',')
+                        .append(connection.maxFrameAt())
+                        .append(',')
+                        .append(jsonCell(connection.maxFrameContext()))
+                        .append(',')
+                        .append(connection.maxInterFrameGapNs())
                         .append(',')
                         .append(connection.bookFrames())
                         .append(',')
@@ -86,13 +95,23 @@ public class ReportWriter {
                         .append(',')
                         .append(connection.onMessageMaxUs())
                         .append(',')
-                        .append(connection.lastPong())
+                        .append(jsonCell(connection.maxCallbackContext()))
+                        .append(',')
+                        .append(connection.lastPingAt())
+                        .append(',')
+                        .append(connection.lastPongAt())
+                        .append(',')
+                        .append(connection.lastPongRttMs())
+                        .append(',')
+                        .append(connection.maxPongRttMs())
                         .append(',')
                         .append(quote(connection.close()))
                         .append(',')
                         .append(quote(connection.failure()))
                         .append(',')
-                        .append(quote(connection.eventTypes().toString()))
+                        .append(jsonCell(connection.eventTypes()))
+                        .append(',')
+                        .append(jsonCell(connection.history()))
                         .append('\n');
             }
         }
@@ -104,6 +123,10 @@ public class ReportWriter {
 
     public Map<String, Object> latest() {
         return latest;
+    }
+
+    private String jsonCell(Object value) throws JsonProcessingException {
+        return quote(mapper.writeValueAsString(value));
     }
 
     private static String quote(Object value) {

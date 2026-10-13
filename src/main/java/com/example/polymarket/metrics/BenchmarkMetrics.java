@@ -3,9 +3,11 @@ package com.example.polymarket.metrics;
 import com.example.polymarket.config.BenchmarkProperties;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
@@ -17,13 +19,10 @@ import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 
-/**
- * 汇总连接、消息、队列和回调耗时指标，并生成阶段快照。
- *
- * <p>WebSocket 回调线程、业务消费线程、定时日志线程会并发读写本类。热路径计数使用 {@link LongAdder}，状态值使用原子类；
- * 阶段列表通过同步包装并在读取时复制，快照允许反映采集时刻附近的最终一致值。
- */
+/** 汇总连接、消息、队列、回调耗时和连接生命周期指标，并生成阶段快照。 */
 public class BenchmarkMetrics {
+    static final int HISTORY_CAPACITY = 64;
+
     private static final long[] LATENCY_BOUNDS = {
         1_000,
         2_000,
@@ -40,6 +39,25 @@ public class BenchmarkMetrics {
         10_000_000
     };
 
+    public record FramePeak(Instant at, String type, int bytes) {
+        private static final FramePeak EMPTY = new FramePeak(null, "", 0);
+    }
+
+    public record CallbackPeak(Instant at, String type, int bytes, long durationNs) {
+        private static final CallbackPeak EMPTY = new CallbackPeak(null, "", 0, 0);
+    }
+
+    public record LifecycleEvent(
+            Instant at,
+            long generation,
+            String callback,
+            String source,
+            Integer code,
+            Integer response,
+            String error) {}
+
+    private record PendingPing(long generation, Instant at, long nanoTime) {}
+
     /** 单条连接的无锁/低竞争指标容器。 */
     public static final class Connection {
         public final LongAdder frames = new LongAdder();
@@ -51,19 +69,49 @@ public class BenchmarkMetrics {
         public final LongAdder dropped = new LongAdder();
         public final LongAdder latencyTotalNs = new LongAdder();
         public final LongAdder latencyCount = new LongAdder();
-        public final AtomicLong maxFrame = new AtomicLong();
+        public final AtomicLong generation = new AtomicLong();
+        public final AtomicLong reconnectCount = new AtomicLong();
+        public final AtomicLong lastFrameAtEpochMs = new AtomicLong();
+        public final AtomicReference<FramePeak> maxFrame = new AtomicReference<>(FramePeak.EMPTY);
+        public final AtomicReference<CallbackPeak> maxCallback =
+                new AtomicReference<>(CallbackPeak.EMPTY);
+        public final AtomicLong maxInterFrameGapNs = new AtomicLong();
         public final AtomicLong latencyMaxNs = new AtomicLong();
-        public final AtomicLong lastPongEpochMs = new AtomicLong();
+        public final AtomicReference<Instant> lastPingAt = new AtomicReference<>();
+        public final AtomicLong lastPongAtEpochMs = new AtomicLong();
+        public final AtomicLong lastPongRttNs = new AtomicLong();
+        public final AtomicLong maxPongRttNs = new AtomicLong();
         public final AtomicInteger subscriptions = new AtomicInteger();
         public final AtomicReference<String> close = new AtomicReference<>("");
         public final AtomicReference<String> failure = new AtomicReference<>("");
         public final ConcurrentHashMap<String, LongAdder> eventTypes = new ConcurrentHashMap<>();
         public final AtomicLongArray latencyBuckets =
                 new AtomicLongArray(LATENCY_BOUNDS.length + 1);
+
+        private final AtomicLong lastFrameNanoTime = new AtomicLong();
+        private final AtomicReference<PendingPing> pendingPing = new AtomicReference<>();
+        private final Deque<LifecycleEvent> history = new ArrayDeque<>(HISTORY_CAPACITY);
+
+        private void addHistory(LifecycleEvent event) {
+            synchronized (history) {
+                if (history.size() == HISTORY_CAPACITY) {
+                    history.removeFirst();
+                }
+                history.addLast(event);
+            }
+        }
+
+        private List<LifecycleEvent> historySnapshot() {
+            synchronized (history) {
+                return List.copyOf(history);
+            }
+        }
     }
 
     public record ConnectionSnapshot(
             int id,
+            long generation,
+            long reconnectCount,
             int subscriptions,
             long frames,
             long bytes,
@@ -76,14 +124,23 @@ public class BenchmarkMetrics {
             double queueUsage,
             long averageFrame,
             long maxFrame,
+            Instant lastFrameAt,
+            Instant maxFrameAt,
+            FramePeak maxFrameContext,
+            long maxInterFrameGapNs,
             Map<String, Long> eventTypes,
             double onMessageAverageUs,
             double onMessageP95Us,
             double onMessageP99Us,
             double onMessageMaxUs,
-            Instant lastPong,
+            CallbackPeak maxCallbackContext,
+            Instant lastPingAt,
+            Instant lastPongAt,
+            double lastPongRttMs,
+            double maxPongRttMs,
             String close,
-            String failure) {}
+            String failure,
+            List<LifecycleEvent> history) {}
 
     public record PhaseSnapshot(
             String phase,
@@ -119,31 +176,193 @@ public class BenchmarkMetrics {
         return connections.length;
     }
 
-    public void frame(int id, int bytes, String type, long latencyNs, boolean queued) {
+    public void publishGeneration(int id, long generation) {
         Connection connection = connections[id];
+        connection.generation.set(generation);
+        connection.lastFrameNanoTime.set(0);
+        connection.pendingPing.set(null);
+    }
+
+    public boolean isCurrentGeneration(int id, long generation) {
+        return connections[id].generation.get() == generation;
+    }
+
+    public void reconnected(int id, long generation) {
+        Connection connection = connections[id];
+        if (connection.generation.get() == generation) {
+            connection.reconnectCount.incrementAndGet();
+        }
+    }
+
+    public void frame(
+            int id,
+            long generation,
+            int bytes,
+            String type,
+            long callbackStartedEpochMs,
+            long callbackStartedNs,
+            long callbackDurationNs,
+            boolean queued) {
+        Connection connection = connections[id];
+        if (connection.generation.get() != generation) {
+            return;
+        }
+
         connection.frames.increment();
         connection.bytes.add(bytes);
-        connection.maxFrame.accumulateAndGet(bytes, Math::max);
+        connection.lastFrameAtEpochMs.set(callbackStartedEpochMs);
+        updateMaxFrame(connection.maxFrame, callbackStartedEpochMs, type, bytes);
+        updateMaxCallback(
+                connection.maxCallback,
+                callbackStartedEpochMs,
+                type,
+                bytes,
+                callbackDurationNs);
+        long previousFrameNs = connection.lastFrameNanoTime.getAndSet(callbackStartedNs);
+        if (previousFrameNs != 0 && callbackStartedNs >= previousFrameNs) {
+            connection.maxInterFrameGapNs.accumulateAndGet(
+                    callbackStartedNs - previousFrameNs, Math::max);
+        }
         connection.eventTypes.computeIfAbsent(type, ignored -> new LongAdder()).increment();
         if ("book".equals(type)) {
             connection.bookFrames.increment();
             connection.bookBytes.add(bytes);
         } else if (!"pong".equals(type)) {
-            // offer 失败代表有界队列已满：不阻塞回调线程，直接记为丢弃。
             if (queued) {
                 connection.enqueued.increment();
             } else {
                 connection.dropped.increment();
             }
         }
-        connection.latencyTotalNs.add(latencyNs);
+        connection.latencyTotalNs.add(callbackDurationNs);
         connection.latencyCount.increment();
-        connection.latencyMaxNs.accumulateAndGet(latencyNs, Math::max);
+        connection.latencyMaxNs.accumulateAndGet(callbackDurationNs, Math::max);
         int bucket = 0;
-        while (bucket < LATENCY_BOUNDS.length && latencyNs > LATENCY_BOUNDS[bucket]) {
+        while (bucket < LATENCY_BOUNDS.length && callbackDurationNs > LATENCY_BOUNDS[bucket]) {
             bucket++;
         }
         connection.latencyBuckets.incrementAndGet(bucket);
+    }
+
+    private static void updateMaxFrame(
+            AtomicReference<FramePeak> reference,
+            long callbackStartedEpochMs,
+            String type,
+            int bytes) {
+        FramePeak current = reference.get();
+        if (bytes <= current.bytes()) {
+            return;
+        }
+        FramePeak candidate =
+                new FramePeak(Instant.ofEpochMilli(callbackStartedEpochMs), type, bytes);
+        while (bytes > current.bytes() && !reference.compareAndSet(current, candidate)) {
+            current = reference.get();
+        }
+    }
+
+    private static void updateMaxCallback(
+            AtomicReference<CallbackPeak> reference,
+            long callbackStartedEpochMs,
+            String type,
+            int bytes,
+            long callbackDurationNs) {
+        CallbackPeak current = reference.get();
+        if (callbackDurationNs <= current.durationNs()) {
+            return;
+        }
+        CallbackPeak candidate =
+                new CallbackPeak(
+                        Instant.ofEpochMilli(callbackStartedEpochMs),
+                        type,
+                        bytes,
+                        callbackDurationNs);
+        while (callbackDurationNs > current.durationNs()
+                && !reference.compareAndSet(current, candidate)) {
+            current = reference.get();
+        }
+    }
+
+    public boolean ping(int id, long generation, Instant at, long nanoTime) {
+        Connection connection = connections[id];
+        if (connection.generation.get() != generation) {
+            return false;
+        }
+        PendingPing pending = new PendingPing(generation, at, nanoTime);
+        if (!connection.pendingPing.compareAndSet(null, pending)) {
+            return false;
+        }
+        if (connection.generation.get() != generation) {
+            connection.pendingPing.compareAndSet(pending, null);
+            return false;
+        }
+        connection.lastPingAt.set(at);
+        return true;
+    }
+
+    public void cancelPing(int id, long generation) {
+        Connection connection = connections[id];
+        PendingPing pending = connection.pendingPing.get();
+        if (pending != null && pending.generation() == generation) {
+            connection.pendingPing.compareAndSet(pending, null);
+        }
+    }
+
+    public boolean pong(int id, long generation, long epochMs, long nanoTime) {
+        Connection connection = connections[id];
+        if (connection.generation.get() != generation) {
+            return false;
+        }
+        PendingPing pending = connection.pendingPing.get();
+        if (pending == null
+                || pending.generation() != generation
+                || !connection.pendingPing.compareAndSet(pending, null)) {
+            return false;
+        }
+        long rtt = Math.max(0, nanoTime - pending.nanoTime());
+        connection.lastPongAtEpochMs.set(epochMs);
+        connection.lastPongRttNs.set(rtt);
+        connection.maxPongRttNs.accumulateAndGet(rtt, Math::max);
+        return true;
+    }
+
+    public void close(
+            int id, long generation, String callback, String source, Integer code, String error) {
+        Connection connection = connections[id];
+        String latest = code == null ? String.valueOf(error) : code + ":" + String.valueOf(error);
+        connection.close.set(latest);
+        connection.addHistory(
+                new LifecycleEvent(
+                        Instant.now(), generation, callback, source, code, null, error));
+    }
+
+    public void failure(
+            int id,
+            long generation,
+            String callback,
+            String source,
+            Integer response,
+            Throwable error) {
+        failure(
+                id,
+                generation,
+                callback,
+                source,
+                response,
+                error == null ? null : error.toString());
+    }
+
+    public void failure(
+            int id,
+            long generation,
+            String callback,
+            String source,
+            Integer response,
+            String error) {
+        Connection connection = connections[id];
+        connection.failure.set(String.valueOf(error));
+        connection.addHistory(
+                new LifecycleEvent(
+                        Instant.now(), generation, callback, source, null, response, error));
     }
 
     public void processed(int id) {
@@ -152,10 +371,6 @@ public class BenchmarkMetrics {
 
     public void queueDepth(int id, int depth) {
         queueDepths.set(id, depth);
-    }
-
-    public void pong(int id) {
-        connections[id].lastPongEpochMs.set(System.currentTimeMillis());
     }
 
     public void startPhase(String name) {
@@ -169,7 +384,11 @@ public class BenchmarkMetrics {
             connection.dropped.reset();
             connection.latencyTotalNs.reset();
             connection.latencyCount.reset();
-            connection.maxFrame.set(0);
+            connection.lastFrameAtEpochMs.set(0);
+            connection.maxFrame.set(FramePeak.EMPTY);
+            connection.maxCallback.set(CallbackPeak.EMPTY);
+            connection.maxInterFrameGapNs.set(0);
+            connection.lastFrameNanoTime.set(0);
             connection.latencyMaxNs.set(0);
             connection.eventTypes.clear();
             for (int index = 0; index < connection.latencyBuckets.length(); index++) {
@@ -196,17 +415,21 @@ public class BenchmarkMetrics {
         for (int id = 0; id < connections.length; id++) {
             Connection connection = connections[id];
             long frames = connection.frames.sum();
+            long bytes = connection.bytes.sum();
             long latencyCount = connection.latencyCount.sum();
             Map<String, Long> eventTypes = new TreeMap<>();
             connection.eventTypes.forEach(
                     (type, count) -> eventTypes.put(type, count.sum()));
-            long pong = connection.lastPongEpochMs.get();
+            FramePeak maxFrame = connection.maxFrame.get();
+            CallbackPeak maxCallback = connection.maxCallback.get();
             result.add(
                     new ConnectionSnapshot(
                             id,
+                            connection.generation.get(),
+                            connection.reconnectCount.get(),
                             connection.subscriptions.get(),
                             frames,
-                            connection.bytes.sum(),
+                            bytes,
                             connection.bookFrames.sum(),
                             connection.bookBytes.sum(),
                             connection.enqueued.sum(),
@@ -214,8 +437,12 @@ public class BenchmarkMetrics {
                             connection.dropped.sum(),
                             depths[id],
                             queueCapacity == 0 ? 0 : (double) depths[id] / queueCapacity,
-                            frames == 0 ? 0 : connection.bytes.sum() / frames,
-                            connection.maxFrame.get(),
+                            frames == 0 ? 0 : bytes / frames,
+                            maxFrame.bytes(),
+                            instantOrNull(connection.lastFrameAtEpochMs.get()),
+                            maxFrame.at(),
+                            maxFrame,
+                            connection.maxInterFrameGapNs.get(),
                             eventTypes,
                             latencyCount == 0
                                     ? 0
@@ -223,11 +450,20 @@ public class BenchmarkMetrics {
                             percentile(connection, .95) / 1000.0,
                             percentile(connection, .99) / 1000.0,
                             connection.latencyMaxNs.get() / 1000.0,
-                            pong == 0 ? null : Instant.ofEpochMilli(pong),
+                            maxCallback,
+                            connection.lastPingAt.get(),
+                            instantOrNull(connection.lastPongAtEpochMs.get()),
+                            connection.lastPongRttNs.get() / 1_000_000.0,
+                            connection.maxPongRttNs.get() / 1_000_000.0,
                             connection.close.get(),
-                            connection.failure.get()));
+                            connection.failure.get(),
+                            connection.historySnapshot()));
         }
         return result;
+    }
+
+    private static Instant instantOrNull(long epochMs) {
+        return epochMs == 0 ? null : Instant.ofEpochMilli(epochMs);
     }
 
     private long percentile(Connection connection, double percentile) {
