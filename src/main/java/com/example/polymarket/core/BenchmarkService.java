@@ -135,10 +135,9 @@ public class BenchmarkService implements ApplicationRunner, SmartLifecycle {
         if (!running.get()) {
             return;
         }
-        try {
-            connectPermits.acquire();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+        // 不阻塞 scheduler 或启动线程；许可不足时短暂延后，由同一任务再次竞争。
+        if (!connectPermits.tryAcquire()) {
+            scheduler.schedule(() -> connect(id), 50, TimeUnit.MILLISECONDS);
             return;
         }
         if (!running.get()) {
